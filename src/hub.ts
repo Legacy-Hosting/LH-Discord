@@ -2,6 +2,50 @@ import { z } from "zod";
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const serviceState = z.enum(["operational", "degraded", "outage", "maintenance"]);
+const githubCommitSchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{40}$/i),
+  message: z.string(),
+  timestamp: z.string(),
+  url: z.string().url(),
+  author: z.object({
+    name: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+    username: z.string().nullable().optional(),
+  }).nullable().optional(),
+  committer: z.object({
+    name: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+    username: z.string().nullable().optional(),
+  }).nullable().optional(),
+  distinct: z.boolean().optional(),
+});
+const githubPushEventSchema = z.object({
+  deliveryId: z.string(),
+  repository: z.object({
+    fullName: z.string(),
+    url: z.string().url(),
+    defaultBranch: z.string(),
+    private: z.boolean(),
+  }),
+  ref: z.string(),
+  branch: z.string(),
+  before: z.string(),
+  after: z.string(),
+  compareUrl: z.string().url(),
+  created: z.boolean(),
+  deleted: z.boolean(),
+  forced: z.boolean(),
+  pusher: z.object({ name: z.string(), email: z.string().nullable().optional() }),
+  sender: z.object({
+    login: z.string(),
+    avatar_url: z.string().url().optional(),
+    html_url: z.string().url().optional(),
+  }),
+  headCommit: githubCommitSchema.nullable(),
+  commits: z.array(githubCommitSchema),
+  receivedAt: z.string().datetime(),
+  channelIds: z.array(snowflake),
+});
 
 const configurationSchema = z.object({
   configured: z.literal(true),
@@ -55,6 +99,7 @@ const configurationSchema = z.object({
 
 export type HubDiscordConfiguration = z.infer<typeof configurationSchema>;
 export type DiscordServiceState = z.infer<typeof serviceState>;
+export type GitHubPushEvent = z.infer<typeof githubPushEventSchema>;
 
 export function createHubClient(options: {
   hubUrl: string;
@@ -103,6 +148,19 @@ export function createHubClient(options: {
         body: JSON.stringify({ key, year }),
       });
       if (!response.ok) throw new Error(`Hub announcement receipt returned ${response.status}`);
+    },
+    async githubEvents() {
+      const response = await request("/api/v1/internal/discord/github-events");
+      if (!response.ok) throw new Error(`Hub GitHub event queue returned ${response.status}`);
+      return z.object({ events: z.array(githubPushEventSchema) }).parse(await response.json()).events;
+    },
+    async acknowledgeGithubEvents(deliveryIds: string[]) {
+      const response = await request("/api/v1/internal/discord/github-events/ack", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deliveryIds }),
+      });
+      if (!response.ok) throw new Error(`Hub GitHub acknowledgement returned ${response.status}`);
     },
   };
 }

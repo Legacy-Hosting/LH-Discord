@@ -10,7 +10,7 @@ import {
 } from "discord.js";
 import { createHash } from "node:crypto";
 import { config } from "./config.js";
-import { createHubClient, type HubDiscordConfiguration } from "./hub.js";
+import { createHubClient, type GitHubPushEvent, type HubDiscordConfiguration } from "./hub.js";
 import {
   createNotificationStateStore,
   dueAnnouncements,
@@ -80,16 +80,57 @@ function channelsForEvent(
 }
 
 async function sendToChannels(channelIds: string[], embed: EmbedBuilder) {
-  if (!client?.isReady()) return;
+  if (!client?.isReady()) return false;
+  let delivered = true;
   for (const channelId of new Set(channelIds)) {
     try {
       const channel = await client.channels.fetch(channelId);
-      if (!channel?.isSendable()) continue;
+      if (!channel?.isSendable()) {
+        delivered = false;
+        continue;
+      }
       await channel.send({ embeds: [embed] });
     } catch (error) {
+      delivered = false;
       console.error(`Discord message could not be sent to channel ${channelId}`, error);
     }
   }
+  return delivered;
+}
+
+function pushEmbed(configuration: HubDiscordConfiguration, event: GitHubPushEvent) {
+  const commits = event.commits.filter((commit) => commit.distinct !== false);
+  const lines: string[] = [];
+  for (const commit of commits) {
+    const subject = commit.message.split(/\r?\n/, 1)[0]?.trim() || "Commit without message";
+    const author = commit.author?.name || commit.author?.username || "Unknown author";
+    const line = "[`" + commit.id.slice(0, 7) + "`](" + commit.url + ") " + subject.slice(0, 180) + " — " + author;
+    if (lines.join("\n").length + line.length > 3_200) break;
+    lines.push(line);
+  }
+  if (lines.length < commits.length) lines.push(`…and ${commits.length - lines.length} more commits`);
+  const action = event.deleted ? "deleted branch" : event.created ? "created branch" : "pushed";
+  return new EmbedBuilder()
+    .setColor(0x7561ff)
+    .setAuthor({
+      name: event.sender.login,
+      ...(event.sender.avatar_url ? { iconURL: event.sender.avatar_url } : {}),
+      ...(event.sender.html_url ? { url: event.sender.html_url } : {}),
+    })
+    .setTitle(`${event.repository.fullName} · ${action} ${event.branch}`)
+    .setURL(event.compareUrl)
+    .setDescription(lines.length > 0 ? lines.join("\n") : "No commit objects were included in this push.")
+    .addFields(
+      { name: "Branch", value: `\`${event.branch}\``, inline: true },
+      { name: "Commit reference", value: `\`${event.after.slice(0, 12)}\``, inline: true },
+      { name: "Commits", value: String(commits.length), inline: true },
+      { name: "Pushed by", value: event.pusher.name, inline: true },
+      { name: "GitHub sender", value: event.sender.login, inline: true },
+      { name: "Delivery", value: `\`${event.deliveryId}\``, inline: true },
+    )
+    .setThumbnail(configuration.assets.logo)
+    .setFooter({ text: "Legacy Hosting · GitHub", iconURL: configuration.assets.logo })
+    .setTimestamp(new Date(event.headCommit?.timestamp ?? event.receivedAt));
 }
 
 function serviceEmbed(
@@ -212,6 +253,13 @@ async function runNotifications() {
         .setTimestamp();
       await sendToChannels(announcement.channelIds, embed);
       await hubClient.markAnnouncementSent(announcement.key, announcement.year);
+    }
+
+    const githubEvents = await hubClient.githubEvents();
+    for (const event of githubEvents) {
+      const delivered = await sendToChannels(event.channelIds, pushEmbed(configuration, event));
+      if (!delivered) break;
+      await hubClient.acknowledgeGithubEvents([event.deliveryId]);
     }
 
     await notificationStore.save(state);
