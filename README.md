@@ -23,4 +23,6 @@ release automatically; an explicit rollback is available through
 
 Role synchronization is persisted before each LH-SSO request. Failed requests use bounded exponential retry and survive process restarts; the latest role state replaces older pending state for the same Discord user. After the configured maximum attempts, the entry remains abandoned until `/lh-sync` explicitly retries it. Successes, scheduled retries, and abandoned entries are appended to a protected JSONL audit log without credentials or upstream response bodies.
 
+`/lh-link` gives an eligible staff member a private, ten-minute SSO connection button after their current roles have synchronized successfully. The button opens the SSO-owned passkey confirmation page; the bot never handles SSO credentials. The one-time secret is carried in the URL fragment, validated against the configured SSO origin, and is not written to the queue or audit log. Members without an allowlisted staff role cannot request a link.
+
 Production uses `DISCORD_SYNC_QUEUE_FILE=/var/lib/legacy-hosting-discord/sync-queue.json` and `DISCORD_SYNC_AUDIT_FILE=/var/lib/legacy-hosting-discord/sync-audit.jsonl`. Both files are forced to mode `0600` by the service.

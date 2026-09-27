@@ -1,4 +1,7 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   Client,
   Events,
   GatewayIntentBits,
@@ -7,6 +10,7 @@ import {
 import { config } from "./config.js";
 import {
   roleSyncForMember,
+  requestDiscordLink,
   sendDiscordRoleSync,
   ssoIsHealthy,
 } from "./sso.js";
@@ -23,6 +27,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName("lh-health")
     .setDescription("Check the Legacy Hosting identity service"),
+  new SlashCommandBuilder()
+    .setName("lh-link")
+    .setDescription("Connect your Discord identity to Legacy Hosting SSO"),
 ].map((command) => command.toJSON());
 
 const client = new Client({
@@ -96,6 +103,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.editReply(
       healthy ? "LH-SSO is operational." : "LH-SSO is currently unavailable.",
     );
+    return;
+  }
+
+  if (interaction.commandName === "lh-link") {
+    const member = await interaction.guild?.members.fetch(interaction.user.id);
+    if (!member) {
+      await interaction.reply({ content: "Guild membership was not found.", ephemeral: true });
+      return;
+    }
+    const payload = roleSyncForMember(member);
+    if (payload.staffRoles.length === 0) {
+      await interaction.reply({
+        content: "You need an eligible Legacy Hosting staff role before connecting SSO.",
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const outcome = await syncQueue.synchronize(payload);
+      if (outcome !== "synchronized") {
+        await interaction.editReply(
+          outcome === "queued"
+            ? "Your roles are queued for synchronization. Run `/lh-link` again shortly."
+            : "Role synchronization needs administrator attention before SSO can be connected.",
+        );
+        return;
+      }
+      const link = await requestDiscordLink(payload);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setLabel("Connect SSO account")
+          .setStyle(ButtonStyle.Link)
+          .setURL(link.linkUrl),
+      );
+      await interaction.editReply({
+        content: "Use your Legacy Hosting passkey to confirm this connection. The private link expires in 10 minutes and works once.",
+        components: [row],
+      });
+    } catch {
+      await interaction.editReply(
+        "The secure SSO connection link is temporarily unavailable. Please try again.",
+      );
+    }
   }
 });
 
