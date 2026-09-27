@@ -8,12 +8,13 @@ Enable the Discord `Server Members Intent`. Production uses the protected
 `/etc/legacy-hosting/discord.env` file on `ams3-panel-01`; it must have mode
 `0600` and use the same distinct `LH_DISCORD_INTERNAL_TOKEN` as LH-SSO.
 
-Tags named `v*` publish immutable archives to `LH-Releases/LH-Discord` and
-checksums to its `SHA256` directory. Deploy the matching archive and checksum
-on the Panel host with:
+Tags named `v*` publish immutable archives to `LH-Releases/LH-Discord`,
+checksums to `SHA256`, and detached Ed25519 signatures to `SIGNATURES`. A
+release fails closed when `RELEASE_SIGNING_PRIVATE_KEY_B64` is unavailable.
+Deploy all three files on the Panel host with:
 
 ```bash
-sudo ops/scripts/deploy-release.sh ARCHIVE CHECKSUM VERSION
+sudo ops/scripts/deploy-release.sh ARCHIVE CHECKSUM SIGNATURE VERSION
 ```
 
 The PM2 process reports ready only after Discord authentication and guild
