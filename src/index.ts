@@ -14,6 +14,7 @@ import { createHubClient, type GitHubPushEvent, type HubDiscordConfiguration } f
 import {
   createNotificationStateStore,
   dueAnnouncements,
+  isServiceUnderMaintenance,
   probeService,
 } from "./notifications.js";
 import {
@@ -158,13 +159,16 @@ function maintenanceEmbed(
   maintenance: HubDiscordConfiguration["maintenance"][number],
   completed: boolean,
 ) {
-  const service = configuration.services.find((item) => item.key === maintenance.targetKey);
+  const services = configuration.services.filter((item) => maintenance.targetKeys.includes(item.key));
   return new EmbedBuilder()
     .setColor(completed ? 0x35d89a : 0x7561ff)
     .setTitle(completed ? `${maintenance.title} completed` : maintenance.title)
     .setDescription([
       maintenance.message,
-      service ? `**Service:** ${service.name} (${service.server})` : "",
+      services.length > 0
+        ? `**Services:** ${services.map((service) => `${service.name} (${service.server})`).join(", ")}`
+        : "",
+      `**Impact:** ${maintenance.impact}`,
       completed
         ? "**Status:** Maintenance complete"
         : `**Window:** <t:${Math.floor(Date.parse(maintenance.scheduledFor) / 1_000)}:F> – <t:${Math.floor(Date.parse(maintenance.scheduledUntil) / 1_000)}:F>`,
@@ -197,17 +201,18 @@ async function runNotifications() {
 
     for (const maintenance of configuration.maintenance) {
       const previous = state.maintenance[maintenance.id];
-      const service = configuration.services.find((item) => item.key === maintenance.targetKey);
-      if (service && !previous && ["scheduled", "in_progress"].includes(maintenance.status)) {
+      const services = configuration.services.filter((item) => maintenance.targetKeys.includes(item.key));
+      const serviceChannels = services.flatMap((service) => service.channelIds);
+      if (services.length > 0 && !previous && ["scheduled", "in_progress"].includes(maintenance.status)) {
         await sendToChannels(
-          channelsForEvent(configuration, "maintenance", service.channelIds),
+          channelsForEvent(configuration, "maintenance", serviceChannels),
           maintenanceEmbed(configuration, maintenance, false),
         );
       }
-      if (service && maintenance.status === "completed" && previous && previous !== "completed") {
-        completedTargets.add(maintenance.targetKey);
+      if (services.length > 0 && maintenance.status === "completed" && previous && previous !== "completed") {
+        for (const targetKey of maintenance.targetKeys) completedTargets.add(targetKey);
         await sendToChannels(
-          channelsForEvent(configuration, "maintenanceComplete", service.channelIds),
+          channelsForEvent(configuration, "maintenanceComplete", serviceChannels),
           maintenanceEmbed(configuration, maintenance, true),
         );
       }
@@ -216,13 +221,7 @@ async function runNotifications() {
 
     const now = Date.now();
     for (const service of configuration.services) {
-      const activeMaintenance = configuration.maintenance.some((item) =>
-        item.targetKey === service.key &&
-        item.status !== "cancelled" &&
-        item.status !== "completed" &&
-        Date.parse(item.scheduledFor) <= now &&
-        Date.parse(item.scheduledUntil) > now
-      );
+      const activeMaintenance = isServiceUnderMaintenance(configuration, service.key, now);
       const probe = await probeService({
         url: service.url,
         timeoutMs: config.DISCORD_SERVICE_REQUEST_TIMEOUT_MS,

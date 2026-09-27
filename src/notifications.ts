@@ -62,6 +62,20 @@ export async function probeService(options: {
   }
 }
 
+export function isServiceUnderMaintenance(
+  configuration: Pick<HubDiscordConfiguration, "maintenance">,
+  serviceKey: HubDiscordConfiguration["services"][number]["key"],
+  now = Date.now(),
+) {
+  return configuration.maintenance.some((item) =>
+    item.targetKeys.includes(serviceKey) &&
+    item.status !== "cancelled" &&
+    item.status !== "completed" &&
+    Date.parse(item.scheduledFor) <= now &&
+    Date.parse(item.scheduledUntil) > now
+  );
+}
+
 export function osloCalendar(now = new Date()) {
   const values = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {

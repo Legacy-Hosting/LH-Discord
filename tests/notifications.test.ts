@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dueAnnouncements, probeService } from "../src/notifications.js";
+import { dueAnnouncements, isServiceUnderMaintenance, probeService } from "../src/notifications.js";
 import type { HubDiscordConfiguration } from "../src/hub.js";
 
 test("service probes distinguish direct latency degradation from outages", async () => {
@@ -19,6 +19,26 @@ test("service probes distinguish direct latency degradation from outages", async
     fetchImplementation: async () => new Response("no", { status: 503 }),
   });
   assert.equal(outage.state, "outage");
+});
+
+test("maintenance suppresses status notifications for every affected service only during its window", () => {
+  const configuration = {
+    maintenance: [{
+      id: "maintenance-1",
+      targetKeys: ["api", "sso"],
+      impact: "major",
+      title: "Platform maintenance",
+      message: "Updating shared infrastructure.",
+      scheduledFor: "2026-09-27T20:00:00.000Z",
+      scheduledUntil: "2026-09-27T21:00:00.000Z",
+      status: "in_progress",
+    }],
+  } as HubDiscordConfiguration;
+  const during = Date.parse("2026-09-27T20:30:00.000Z");
+  assert.equal(isServiceUnderMaintenance(configuration, "api", during), true);
+  assert.equal(isServiceUnderMaintenance(configuration, "sso", during), true);
+  assert.equal(isServiceUnderMaintenance(configuration, "panel", during), false);
+  assert.equal(isServiceUnderMaintenance(configuration, "api", Date.parse("2026-09-27T21:00:00.000Z")), false);
 });
 
 test("annual announcements use the Oslo calendar and only send once", () => {

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const serviceState = z.enum(["operational", "degraded", "outage", "maintenance"]);
+const serviceKey = z.enum(["api", "sso", "hub", "panel", "status"]);
 const githubCommitSchema = z.object({
   id: z.string().regex(/^[a-f0-9]{40}$/i),
   message: z.string(),
@@ -47,12 +48,28 @@ const githubPushEventSchema = z.object({
   channelIds: z.array(snowflake),
 });
 
+const maintenanceSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const item = value as Record<string, unknown>;
+  if (Array.isArray(item.targetKeys) || typeof item.targetKey !== "string") return value;
+  return { ...item, targetKeys: [item.targetKey] };
+}, z.object({
+  id: z.string(),
+  targetKeys: z.array(serviceKey).min(1).max(5),
+  impact: z.enum(["none", "minor", "major", "critical"]).default("none"),
+  title: z.string(),
+  message: z.string(),
+  scheduledFor: z.string().datetime(),
+  scheduledUntil: z.string().datetime(),
+  status: z.enum(["scheduled", "in_progress", "completed", "cancelled"]),
+}));
+
 const configurationSchema = z.object({
   configured: z.literal(true),
   botToken: z.string().min(20),
   guildId: snowflake,
   services: z.array(z.object({
-    key: z.enum(["api", "sso", "hub", "panel", "status"]),
+    key: serviceKey,
     name: z.string().min(1),
     server: z.string().min(1),
     url: z.string().url(),
@@ -75,15 +92,7 @@ const configurationSchema = z.object({
     channelIds: z.array(snowflake),
     lastSentYear: z.number().int().optional(),
   })),
-  maintenance: z.array(z.object({
-    id: z.string(),
-    targetKey: z.enum(["api", "sso", "hub", "panel", "status"]),
-    title: z.string(),
-    message: z.string(),
-    scheduledFor: z.string().datetime(),
-    scheduledUntil: z.string().datetime(),
-    status: z.enum(["scheduled", "in_progress", "completed", "cancelled"]),
-  })),
+  maintenance: z.array(maintenanceSchema),
   assets: z.object({
     operational: z.string().url(),
     outage: z.string().url(),
