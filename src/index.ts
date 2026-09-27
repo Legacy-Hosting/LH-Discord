@@ -23,7 +23,8 @@ const client = new Client({
 client.once(Events.ClientReady, async (readyClient) => {
   const guild = await readyClient.guilds.fetch(config.DISCORD_GUILD_ID);
   await guild.commands.set(commands);
-  console.log(`LH-Discord 1.0.0 ready as ${readyClient.user.tag}`);
+  console.log(`LH-Discord ready as ${readyClient.user.tag}`);
+  process.send?.("ready");
 });
 
 client.on(Events.GuildMemberUpdate, async (_previous, member) => {

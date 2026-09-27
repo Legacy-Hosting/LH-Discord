@@ -13,6 +13,11 @@ if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
 fi
 
 repository_root=$(cd "$(dirname "$0")/../.." && pwd)
+package_version=$(cd "$repository_root" && node -p "require('./package.json').version")
+if [[ $package_version != "$version" ]]; then
+  echo "Release version $version does not match package version $package_version" >&2
+  exit 1
+fi
 releases_root=${2:-"$repository_root/../LH-Releases"}
 service_directory="$releases_root/LH-Discord"
 checksum_directory="$service_directory/SHA256"
@@ -36,7 +41,7 @@ temporary_directory=$(mktemp -d)
 trap 'rm -rf -- "$temporary_directory"' EXIT
 release_root="$temporary_directory/lh-discord-$version"
 mkdir -p "$release_root"
-cp -a "$repository_root"/{dist,package.json,pnpm-lock.yaml,pnpm-workspace.yaml,ecosystem.config.cjs,.env.example,README.md} "$release_root/"
+cp -a "$repository_root"/{dist,package.json,pnpm-lock.yaml,pnpm-workspace.yaml,ecosystem.config.cjs,.env.example,README.md,ops} "$release_root/"
 
 {
   printf 'service=LH-Discord\n'

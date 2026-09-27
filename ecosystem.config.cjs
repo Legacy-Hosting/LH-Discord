@@ -7,6 +7,8 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
+      wait_ready: true,
+      listen_timeout: 30000,
       watch: false,
       max_memory_restart: '256M',
       kill_timeout: 10000,
