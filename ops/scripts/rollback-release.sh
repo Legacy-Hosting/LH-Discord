@@ -19,6 +19,28 @@ for release in "$current" "$previous"; do
   fi
 done
 
+marker_existed=false
+marker_value=
+if [[ -f $base/current-release ]]; then
+  marker_existed=true
+  marker_value=$(cat "$base/current-release")
+fi
+rollback_on_error() {
+  failure=$?
+  trap - ERR
+  ln -sfn "$current" "$base/current"
+  ln -sfn "$previous" "$base/previous"
+  if [[ $marker_existed == true ]]; then
+    printf '%s\n' "$marker_value" > "$base/current-release"
+  else
+    rm -f -- "$base/current-release"
+  fi
+  pm2 delete lh-discord >/dev/null 2>&1 || true
+  pm2 start "$current/ecosystem.config.cjs" --update-env >/dev/null 2>&1 || true
+  pm2 save >/dev/null 2>&1 || true
+  exit "$failure"
+}
+trap rollback_on_error ERR
 ln -sfn "$previous" "$base/current"
 ln -sfn "$current" "$base/previous"
 pm2 delete lh-discord >/dev/null 2>&1 || true
@@ -26,4 +48,5 @@ pm2 start "$previous/ecosystem.config.cjs" --update-env
 pm2 save
 basename "$previous" > "$base/current-release"
 "$previous/ops/scripts/verify-release.sh"
+trap - ERR
 echo "LH-Discord rolled back to $(basename "$previous")."
