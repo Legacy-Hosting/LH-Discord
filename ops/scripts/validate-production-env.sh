@@ -16,7 +16,10 @@ set -a
 . "$environment_file"
 set +a
 required=(NODE_ENV DISCORD_TOKEN DISCORD_APPLICATION_ID DISCORD_GUILD_ID LH_SSO_URL \
-  LH_DISCORD_INTERNAL_TOKEN DISCORD_ROLE_FOUNDER_ID DISCORD_ROLE_MANAGEMENT_ID \
+  LH_DISCORD_INTERNAL_TOKEN DISCORD_SYNC_QUEUE_FILE DISCORD_SYNC_AUDIT_FILE \
+  DISCORD_SYNC_POLL_INTERVAL_MS DISCORD_SYNC_RETRY_BASE_MS \
+  DISCORD_SYNC_RETRY_MAX_MS DISCORD_SYNC_MAX_ATTEMPTS \
+  DISCORD_ROLE_FOUNDER_ID DISCORD_ROLE_MANAGEMENT_ID \
   DISCORD_ROLE_ADMINISTRATOR_ID DISCORD_ROLE_DEVELOPER_ID \
   DISCORD_ROLE_INFRASTRUCTURE_ID DISCORD_ROLE_SUPPORT_ID DISCORD_ROLE_SALES_ID)
 for name in "${required[@]}"; do
@@ -35,6 +38,11 @@ if [[ $LH_SSO_URL != https://* ]]; then
 fi
 if [[ ${#DISCORD_TOKEN} -lt 20 || ${#LH_DISCORD_INTERNAL_TOKEN} -lt 32 ]]; then
   echo "Discord and SSO credentials do not meet their minimum lengths" >&2
+  exit 1
+fi
+if [[ $DISCORD_SYNC_QUEUE_FILE != /var/lib/legacy-hosting-discord/* || \
+      $DISCORD_SYNC_AUDIT_FILE != /var/lib/legacy-hosting-discord/* ]]; then
+  echo "Discord queue and audit files must stay below /var/lib/legacy-hosting-discord" >&2
   exit 1
 fi
 

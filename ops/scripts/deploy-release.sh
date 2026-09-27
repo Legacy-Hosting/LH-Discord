@@ -28,6 +28,7 @@ if [[ -e $release ]]; then
   exit 1
 fi
 install -d -m 0755 "$base/releases"
+install -d -m 0750 /var/lib/legacy-hosting-discord
 staging=$(mktemp -d "$base/releases/.staging-${version}.XXXXXX")
 trap 'rm -rf -- "$staging"' EXIT
 tar -xzf "$archive" --no-same-owner --strip-components=1 -C "$staging"

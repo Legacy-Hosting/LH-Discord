@@ -4,6 +4,7 @@ set -Eeuo pipefail
 base=/opt/legacy-hosting/discord
 test -L "$base/current"
 test -f "$base/current-release"
+test -d /var/lib/legacy-hosting-discord
 pm2 describe lh-discord >/dev/null
 current_release=$(readlink -f "$base/current")
 if [[ $current_release != "$base/releases/"* ]]; then

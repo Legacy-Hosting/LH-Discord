@@ -5,7 +5,16 @@ import {
   SlashCommandBuilder,
 } from "discord.js";
 import { config } from "./config.js";
-import { ssoIsHealthy, syncDiscordMember } from "./sso.js";
+import {
+  roleSyncForMember,
+  sendDiscordRoleSync,
+  ssoIsHealthy,
+} from "./sso.js";
+import {
+  createFileSyncAuditWriter,
+  createFileSyncQueueStore,
+  createRoleSyncQueue,
+} from "./sync-queue.js";
 
 const commands = [
   new SlashCommandBuilder()
@@ -20,6 +29,23 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
+const syncQueue = createRoleSyncQueue({
+  sync: sendDiscordRoleSync,
+  store: createFileSyncQueueStore(config.DISCORD_SYNC_QUEUE_FILE),
+  audit: createFileSyncAuditWriter(config.DISCORD_SYNC_AUDIT_FILE),
+  pollIntervalMs: config.DISCORD_SYNC_POLL_INTERVAL_MS,
+  retryBaseMs: config.DISCORD_SYNC_RETRY_BASE_MS,
+  retryMaxMs: config.DISCORD_SYNC_RETRY_MAX_MS,
+  maxAttempts: config.DISCORD_SYNC_MAX_ATTEMPTS,
+  onError: (error) => console.error("Discord role sync queue failed", error),
+});
+
+const restoredEntries = await syncQueue.restore();
+if (restoredEntries > 0) {
+  console.log(`Restored ${restoredEntries} pending Discord role synchronizations`);
+}
+syncQueue.start();
+
 client.once(Events.ClientReady, async (readyClient) => {
   const guild = await readyClient.guilds.fetch(config.DISCORD_GUILD_ID);
   await guild.commands.set(commands);
@@ -30,9 +56,12 @@ client.once(Events.ClientReady, async (readyClient) => {
 client.on(Events.GuildMemberUpdate, async (_previous, member) => {
   if (member.guild.id !== config.DISCORD_GUILD_ID) return;
   try {
-    await syncDiscordMember(member);
+    const outcome = await syncQueue.synchronize(roleSyncForMember(member));
+    if (outcome !== "synchronized") {
+      console.warn(`Discord role synchronization ${outcome} for ${member.id}`);
+    }
   } catch (error) {
-    console.error("Discord role synchronization failed", error);
+    console.error("Discord role synchronization queue failed", error);
   }
 });
 
@@ -47,8 +76,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     await interaction.deferReply({ ephemeral: true });
     try {
-      await syncDiscordMember(member);
-      await interaction.editReply("Your Legacy Hosting staff roles are synchronized.");
+      const outcome = await syncQueue.synchronize(roleSyncForMember(member));
+      if (outcome === "synchronized") {
+        await interaction.editReply("Your Legacy Hosting staff roles are synchronized.");
+      } else if (outcome === "queued") {
+        await interaction.editReply("Role synchronization is queued and will retry automatically.");
+      } else {
+        await interaction.editReply("Role synchronization needs administrator attention.");
+      }
     } catch {
       await interaction.editReply("Role synchronization is temporarily unavailable.");
     }
@@ -66,6 +101,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    syncQueue.stop();
     client.destroy();
     process.exit(0);
   });

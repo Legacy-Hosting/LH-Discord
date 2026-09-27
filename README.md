@@ -20,3 +20,7 @@ The PM2 process reports ready only after Discord authentication and guild
 command registration have completed. Deploy failures restore the previous
 release automatically; an explicit rollback is available through
 `ops/scripts/rollback-release.sh`.
+
+Role synchronization is persisted before each LH-SSO request. Failed requests use bounded exponential retry and survive process restarts; the latest role state replaces older pending state for the same Discord user. After the configured maximum attempts, the entry remains abandoned until `/lh-sync` explicitly retries it. Successes, scheduled retries, and abandoned entries are appended to a protected JSONL audit log without credentials or upstream response bodies.
+
+Production uses `DISCORD_SYNC_QUEUE_FILE=/var/lib/legacy-hosting-discord/sync-queue.json` and `DISCORD_SYNC_AUDIT_FILE=/var/lib/legacy-hosting-discord/sync-audit.jsonl`. Both files are forced to mode `0600` by the service.

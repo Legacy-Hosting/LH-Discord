@@ -4,24 +4,41 @@ import { configuredStaffRoles, resolveStaffRoles } from "./roles.js";
 
 const roles = configuredStaffRoles(process.env);
 
-export async function syncDiscordMember(member: GuildMember) {
-  const response = await fetch(`${config.LH_SSO_URL}/internal/discord/role-sync`, {
+export type DiscordRoleSync = {
+  discordUserId: string;
+  discordGuildId: string;
+  staffRoles: ReturnType<typeof resolveStaffRoles>;
+};
+
+export function roleSyncForMember(member: GuildMember): DiscordRoleSync {
+  return {
+    discordUserId: member.id,
+    discordGuildId: member.guild.id,
+    staffRoles: resolveStaffRoles(member.roles.cache.keys(), roles),
+  };
+}
+
+export async function sendDiscordRoleSync(
+  payload: DiscordRoleSync,
+  fetchImplementation: typeof fetch = fetch,
+) {
+  const response = await fetchImplementation(`${config.LH_SSO_URL}/internal/discord/role-sync`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${config.LH_DISCORD_INTERNAL_TOKEN}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({
-      discordUserId: member.id,
-      discordGuildId: member.guild.id,
-      staffRoles: resolveStaffRoles(member.roles.cache.keys(), roles),
-    }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(5_000),
   });
 
   if (!response.ok) {
     throw new Error(`LH-SSO role sync failed with status ${response.status}`);
   }
+}
+
+export async function syncDiscordMember(member: GuildMember) {
+  return sendDiscordRoleSync(roleSyncForMember(member));
 }
 
 export async function ssoIsHealthy() {
