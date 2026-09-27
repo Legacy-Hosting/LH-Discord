@@ -3,11 +3,19 @@ import {
   ButtonBuilder,
   ButtonStyle,
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   SlashCommandBuilder,
 } from "discord.js";
+import { createHash } from "node:crypto";
 import { config } from "./config.js";
+import { createHubClient, type HubDiscordConfiguration } from "./hub.js";
+import {
+  createNotificationStateStore,
+  dueAnnouncements,
+  probeService,
+} from "./notifications.js";
 import {
   roleSyncForMember,
   requestDiscordLink,
@@ -32,10 +40,6 @@ const commands = [
     .setDescription("Connect your Discord identity to Legacy Hosting SSO"),
 ].map((command) => command.toJSON());
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
-});
-
 const syncQueue = createRoleSyncQueue({
   sync: sendDiscordRoleSync,
   store: createFileSyncQueueStore(config.DISCORD_SYNC_QUEUE_FILE),
@@ -46,116 +50,290 @@ const syncQueue = createRoleSyncQueue({
   maxAttempts: config.DISCORD_SYNC_MAX_ATTEMPTS,
   onError: (error) => console.error("Discord role sync queue failed", error),
 });
+const notificationStore = createNotificationStateStore(config.DISCORD_NOTIFICATION_STATE_FILE);
+const hubClient = config.LH_HUB_DISCORD_SERVICE_TOKEN
+  ? createHubClient({
+      hubUrl: config.LH_HUB_URL,
+      token: config.LH_HUB_DISCORD_SERVICE_TOKEN,
+      timeoutMs: config.DISCORD_SERVICE_REQUEST_TIMEOUT_MS,
+    })
+  : undefined;
 
-const restoredEntries = await syncQueue.restore();
-if (restoredEntries > 0) {
-  console.log(`Restored ${restoredEntries} pending Discord role synchronizations`);
+let client: Client | null = null;
+let currentConfiguration: HubDiscordConfiguration | null = null;
+let credentialFingerprint = "";
+let monitoring = false;
+
+function serviceAppearance(state: "operational" | "degraded" | "outage") {
+  if (state === "operational") return { title: "is operational", color: 0x35d89a, asset: "operational" as const };
+  if (state === "degraded") return { title: "is degraded", color: 0xf3ae48, asset: "degraded" as const };
+  return { title: "is unavailable", color: 0xef6170, asset: "outage" as const };
 }
-syncQueue.start();
 
-client.once(Events.ClientReady, async (readyClient) => {
-  const guild = await readyClient.guilds.fetch(config.DISCORD_GUILD_ID);
-  await guild.commands.set(commands);
-  console.log(`LH-Discord ready as ${readyClient.user.tag}`);
-  process.send?.("ready");
-});
-
-client.on(Events.GuildMemberUpdate, async (_previous, member) => {
-  if (member.guild.id !== config.DISCORD_GUILD_ID) return;
-  try {
-    const outcome = await syncQueue.synchronize(roleSyncForMember(member));
-    if (outcome !== "synchronized") {
-      console.warn(`Discord role synchronization ${outcome} for ${member.id}`);
-    }
-  } catch (error) {
-    console.error("Discord role synchronization queue failed", error);
-  }
-});
-
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
-
-  if (interaction.commandName === "lh-sync") {
-    const member = await interaction.guild?.members.fetch(interaction.user.id);
-    if (!member) {
-      await interaction.reply({ content: "Guild membership was not found.", ephemeral: true });
-      return;
-    }
-    await interaction.deferReply({ ephemeral: true });
+async function sendToChannels(channelIds: string[], embed: EmbedBuilder) {
+  if (!client?.isReady()) return;
+  for (const channelId of new Set(channelIds)) {
     try {
-      const outcome = await syncQueue.synchronize(roleSyncForMember(member));
-      if (outcome === "synchronized") {
-        await interaction.editReply("Your Legacy Hosting staff roles are synchronized.");
-      } else if (outcome === "queued") {
-        await interaction.editReply("Role synchronization is queued and will retry automatically.");
-      } else {
-        await interaction.editReply("Role synchronization needs administrator attention.");
-      }
-    } catch {
-      await interaction.editReply("Role synchronization is temporarily unavailable.");
-    }
-    return;
-  }
-
-  if (interaction.commandName === "lh-health") {
-    await interaction.deferReply({ ephemeral: true });
-    const healthy = await ssoIsHealthy().catch(() => false);
-    await interaction.editReply(
-      healthy ? "LH-SSO is operational." : "LH-SSO is currently unavailable.",
-    );
-    return;
-  }
-
-  if (interaction.commandName === "lh-link") {
-    const member = await interaction.guild?.members.fetch(interaction.user.id);
-    if (!member) {
-      await interaction.reply({ content: "Guild membership was not found.", ephemeral: true });
-      return;
-    }
-    const payload = roleSyncForMember(member);
-    if (payload.staffRoles.length === 0) {
-      await interaction.reply({
-        content: "You need an eligible Legacy Hosting staff role before connecting SSO.",
-        ephemeral: true,
-      });
-      return;
-    }
-    await interaction.deferReply({ ephemeral: true });
-    try {
-      const outcome = await syncQueue.synchronize(payload);
-      if (outcome !== "synchronized") {
-        await interaction.editReply(
-          outcome === "queued"
-            ? "Your roles are queued for synchronization. Run `/lh-link` again shortly."
-            : "Role synchronization needs administrator attention before SSO can be connected.",
-        );
-        return;
-      }
-      const link = await requestDiscordLink(payload);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setLabel("Connect SSO account")
-          .setStyle(ButtonStyle.Link)
-          .setURL(link.linkUrl),
-      );
-      await interaction.editReply({
-        content: "Use your Legacy Hosting passkey to confirm this connection. The private link expires in 10 minutes and works once.",
-        components: [row],
-      });
-    } catch {
-      await interaction.editReply(
-        "The secure SSO connection link is temporarily unavailable. Please try again.",
-      );
+      const channel = await client.channels.fetch(channelId);
+      if (!channel?.isSendable()) continue;
+      await channel.send({ embeds: [embed] });
+    } catch (error) {
+      console.error(`Discord message could not be sent to channel ${channelId}`, error);
     }
   }
-});
+}
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    syncQueue.stop();
-    client.destroy();
-    process.exit(0);
+function serviceEmbed(
+  configuration: HubDiscordConfiguration,
+  service: HubDiscordConfiguration["services"][number],
+  state: "operational" | "degraded" | "outage",
+  latencyMs: number | null,
+) {
+  const appearance = serviceAppearance(state);
+  return new EmbedBuilder()
+    .setColor(appearance.color)
+    .setTitle(`${service.name} ${appearance.title}`)
+    .setDescription([
+      `**Server:** ${service.server}`,
+      `**Status:** ${state}`,
+      `**Response time:** ${latencyMs === null ? "No response" : `${latencyMs} ms`}`,
+    ].join("\n"))
+    .setThumbnail(configuration.assets[appearance.asset])
+    .setFooter({ text: "Legacy Hosting", iconURL: configuration.assets.logo })
+    .setTimestamp();
+}
+
+function maintenanceEmbed(
+  configuration: HubDiscordConfiguration,
+  maintenance: HubDiscordConfiguration["maintenance"][number],
+  completed: boolean,
+) {
+  const service = configuration.services.find((item) => item.key === maintenance.targetKey);
+  return new EmbedBuilder()
+    .setColor(completed ? 0x35d89a : 0x7561ff)
+    .setTitle(completed ? `${maintenance.title} completed` : maintenance.title)
+    .setDescription([
+      maintenance.message,
+      service ? `**Service:** ${service.name} (${service.server})` : "",
+      completed
+        ? "**Status:** Maintenance complete"
+        : `**Window:** <t:${Math.floor(Date.parse(maintenance.scheduledFor) / 1_000)}:F> – <t:${Math.floor(Date.parse(maintenance.scheduledUntil) / 1_000)}:F>`,
+    ].filter(Boolean).join("\n\n"))
+    .setThumbnail(completed ? configuration.assets.maintenanceComplete : configuration.assets.maintenance)
+    .setFooter({ text: "Legacy Hosting", iconURL: configuration.assets.logo })
+    .setTimestamp();
+}
+
+async function reportPresence(configuration: HubDiscordConfiguration) {
+  if (!client?.isReady() || !hubClient) return;
+  const guild = await client.guilds.fetch(configuration.guildId);
+  const channels = await guild.channels.fetch();
+  await hubClient.reportPresence({
+    bot: { id: client.user.id, username: client.user.username },
+    channels: Array.from(channels.values())
+      .filter((channel) => channel?.isTextBased() && !channel.isThread())
+      .map((channel) => ({ id: channel!.id, name: channel!.name }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
   });
 }
 
-await client.login(config.DISCORD_TOKEN);
+async function runNotifications() {
+  if (monitoring || !client?.isReady() || !currentConfiguration || !hubClient) return;
+  monitoring = true;
+  try {
+    const configuration = currentConfiguration;
+    const state = await notificationStore.load();
+    const completedTargets = new Set<string>();
+
+    for (const maintenance of configuration.maintenance) {
+      const previous = state.maintenance[maintenance.id];
+      const service = configuration.services.find((item) => item.key === maintenance.targetKey);
+      if (service && !previous && ["scheduled", "in_progress"].includes(maintenance.status)) {
+        await sendToChannels(service.channelIds, maintenanceEmbed(configuration, maintenance, false));
+      }
+      if (service && maintenance.status === "completed" && previous && previous !== "completed") {
+        completedTargets.add(maintenance.targetKey);
+        await sendToChannels(service.channelIds, maintenanceEmbed(configuration, maintenance, true));
+      }
+      state.maintenance[maintenance.id] = maintenance.status;
+    }
+
+    const now = Date.now();
+    for (const service of configuration.services) {
+      const activeMaintenance = configuration.maintenance.some((item) =>
+        item.targetKey === service.key &&
+        item.status !== "cancelled" &&
+        item.status !== "completed" &&
+        Date.parse(item.scheduledFor) <= now &&
+        Date.parse(item.scheduledUntil) > now
+      );
+      const probe = await probeService({
+        url: service.url,
+        timeoutMs: config.DISCORD_SERVICE_REQUEST_TIMEOUT_MS,
+        degradedAfterMs: config.DISCORD_SERVICE_DEGRADED_AFTER_MS,
+      });
+      const nextState = activeMaintenance ? "maintenance" : probe.state;
+      const previous = state.services[service.key];
+      if (
+        previous && previous !== nextState && nextState !== "maintenance" &&
+        !(completedTargets.has(service.key) && nextState === "operational")
+      ) {
+        await sendToChannels(service.channelIds, serviceEmbed(configuration, service, nextState, probe.latencyMs));
+      }
+      state.services[service.key] = nextState;
+    }
+
+    for (const announcement of dueAnnouncements(configuration)) {
+      const description = announcement.message.replaceAll("{years}", String(announcement.year - 2017));
+      const embed = new EmbedBuilder()
+        .setColor(0x7561ff)
+        .setTitle(announcement.title)
+        .setDescription(description)
+        .setThumbnail(announcement.imageUrl)
+        .setFooter({ text: "Legacy Hosting", iconURL: configuration.assets.logo })
+        .setTimestamp();
+      await sendToChannels(announcement.channelIds, embed);
+      await hubClient.markAnnouncementSent(announcement.key, announcement.year);
+    }
+
+    await notificationStore.save(state);
+  } catch (error) {
+    console.error("LH-Discord notification cycle failed", error);
+  } finally {
+    monitoring = false;
+  }
+}
+
+function attachHandlers(nextClient: Client) {
+  nextClient.on(Events.GuildMemberUpdate, async (_previous, member) => {
+    if (member.guild.id !== currentConfiguration?.guildId) return;
+    try {
+      const outcome = await syncQueue.synchronize(roleSyncForMember(member));
+      if (outcome !== "synchronized") console.warn(`Discord role synchronization ${outcome} for ${member.id}`);
+    } catch (error) {
+      console.error("Discord role synchronization queue failed", error);
+    }
+  });
+
+  nextClient.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
+    if (interaction.commandName === "lh-sync") {
+      const member = await interaction.guild?.members.fetch(interaction.user.id);
+      if (!member) return void await interaction.reply({ content: "Guild membership was not found.", ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const outcome = await syncQueue.synchronize(roleSyncForMember(member));
+        await interaction.editReply(outcome === "synchronized"
+          ? "Your Legacy Hosting staff roles are synchronized."
+          : outcome === "queued"
+            ? "Role synchronization is queued and will retry automatically."
+            : "Role synchronization needs administrator attention.");
+      } catch {
+        await interaction.editReply("Role synchronization is temporarily unavailable.");
+      }
+      return;
+    }
+    if (interaction.commandName === "lh-health") {
+      await interaction.deferReply({ ephemeral: true });
+      const healthy = await ssoIsHealthy().catch(() => false);
+      await interaction.editReply(healthy ? "LH-SSO is operational." : "LH-SSO is currently unavailable.");
+      return;
+    }
+    if (interaction.commandName === "lh-link") {
+      const member = await interaction.guild?.members.fetch(interaction.user.id);
+      if (!member) return void await interaction.reply({ content: "Guild membership was not found.", ephemeral: true });
+      const payload = roleSyncForMember(member);
+      if (payload.staffRoles.length === 0) {
+        return void await interaction.reply({
+          content: "You need an eligible Legacy Hosting staff role before connecting SSO.",
+          ephemeral: true,
+        });
+      }
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const outcome = await syncQueue.synchronize(payload);
+        if (outcome !== "synchronized") {
+          await interaction.editReply(outcome === "queued"
+            ? "Your roles are queued for synchronization. Run `/lh-link` again shortly."
+            : "Role synchronization needs administrator attention before SSO can be connected.");
+          return;
+        }
+        const link = await requestDiscordLink(payload);
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setLabel("Connect SSO account").setStyle(ButtonStyle.Link).setURL(link.linkUrl),
+        );
+        await interaction.editReply({
+          content: "Use your Legacy Hosting passkey to confirm this connection. The private link expires in 10 minutes and works once.",
+          components: [row],
+        });
+      } catch {
+        await interaction.editReply("The secure SSO connection link is temporarily unavailable. Please try again.");
+      }
+    }
+  });
+}
+
+async function applyConfiguration(configuration: HubDiscordConfiguration) {
+  currentConfiguration = configuration;
+  const nextFingerprint = createHash("sha256")
+    .update(`${configuration.guildId}\0${configuration.botToken}`)
+    .digest("hex");
+  if (client?.isReady() && credentialFingerprint === nextFingerprint) {
+    await reportPresence(configuration);
+    return;
+  }
+  client?.destroy();
+  client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+  attachHandlers(client);
+  try {
+    await client.login(configuration.botToken);
+    credentialFingerprint = nextFingerprint;
+    const guild = await client.guilds.fetch(configuration.guildId);
+    await guild.commands.set(commands);
+    await reportPresence(configuration);
+    console.log(`LH-Discord ready as ${client.user?.tag ?? "unknown bot"}`);
+    await runNotifications();
+  } catch (error) {
+    console.error("LH-Discord could not connect with the configured bot", error);
+    client.destroy();
+    client = null;
+    credentialFingerprint = "";
+  }
+}
+
+async function refreshConfiguration() {
+  if (!hubClient) return;
+  try {
+    const configuration = await hubClient.configuration();
+    if (configuration) await applyConfiguration(configuration);
+  } catch (error) {
+    console.error("LH-Discord could not refresh Hub configuration", error);
+  }
+}
+
+const restoredEntries = await syncQueue.restore();
+if (restoredEntries > 0) console.log(`Restored ${restoredEntries} pending Discord role synchronizations`);
+syncQueue.start();
+process.send?.("ready");
+await refreshConfiguration();
+
+const configurationTimer = setInterval(
+  () => void refreshConfiguration(),
+  config.DISCORD_CONFIGURATION_POLL_INTERVAL_MS,
+);
+configurationTimer.unref();
+const notificationTimer = setInterval(
+  () => void runNotifications(),
+  config.DISCORD_SERVICE_POLL_INTERVAL_MS,
+);
+notificationTimer.unref();
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    clearInterval(configurationTimer);
+    clearInterval(notificationTimer);
+    syncQueue.stop();
+    client?.destroy();
+    process.exit(0);
+  });
+}
