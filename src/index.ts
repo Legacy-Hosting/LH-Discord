@@ -70,6 +70,15 @@ function serviceAppearance(state: "operational" | "degraded" | "outage") {
   return { title: "is unavailable", color: 0xef6170, asset: "outage" as const };
 }
 
+function channelsForEvent(
+  configuration: HubDiscordConfiguration,
+  event: "operational" | "degraded" | "outage" | "maintenance" | "maintenanceComplete",
+  fallback: string[],
+) {
+  const configured = configuration.events.find((item) => item.key === event)?.channelIds ?? [];
+  return configured.length > 0 ? configured : fallback;
+}
+
 async function sendToChannels(channelIds: string[], embed: EmbedBuilder) {
   if (!client?.isReady()) return;
   for (const channelId of new Set(channelIds)) {
@@ -149,11 +158,17 @@ async function runNotifications() {
       const previous = state.maintenance[maintenance.id];
       const service = configuration.services.find((item) => item.key === maintenance.targetKey);
       if (service && !previous && ["scheduled", "in_progress"].includes(maintenance.status)) {
-        await sendToChannels(service.channelIds, maintenanceEmbed(configuration, maintenance, false));
+        await sendToChannels(
+          channelsForEvent(configuration, "maintenance", service.channelIds),
+          maintenanceEmbed(configuration, maintenance, false),
+        );
       }
       if (service && maintenance.status === "completed" && previous && previous !== "completed") {
         completedTargets.add(maintenance.targetKey);
-        await sendToChannels(service.channelIds, maintenanceEmbed(configuration, maintenance, true));
+        await sendToChannels(
+          channelsForEvent(configuration, "maintenanceComplete", service.channelIds),
+          maintenanceEmbed(configuration, maintenance, true),
+        );
       }
       state.maintenance[maintenance.id] = maintenance.status;
     }
@@ -178,7 +193,10 @@ async function runNotifications() {
         previous && previous !== nextState && nextState !== "maintenance" &&
         !(completedTargets.has(service.key) && nextState === "operational")
       ) {
-        await sendToChannels(service.channelIds, serviceEmbed(configuration, service, nextState, probe.latencyMs));
+        await sendToChannels(
+          channelsForEvent(configuration, nextState, service.channelIds),
+          serviceEmbed(configuration, service, nextState, probe.latencyMs),
+        );
       }
       state.services[service.key] = nextState;
     }

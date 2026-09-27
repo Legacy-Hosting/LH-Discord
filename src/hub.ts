@@ -14,6 +14,12 @@ const configurationSchema = z.object({
     url: z.string().url(),
     channelIds: z.array(snowflake),
   })),
+  events: z.array(z.object({
+    key: z.enum(["operational", "degraded", "outage", "maintenance", "maintenanceComplete"]),
+    name: z.string().min(1),
+    description: z.string().min(1),
+    channelIds: z.array(snowflake),
+  })),
   announcements: z.array(z.object({
     key: z.enum(["birthday", "christmas", "newyear"]),
     enabled: z.boolean(),
